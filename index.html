@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>은색 거울 조각상 3D</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0f14;color:#e2e8f0;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif}
+  #c{display:block;width:100%;height:100%;touch-action:none}
+  .panel{position:fixed;background:rgba(11,15,20,.88);border:1px solid #1e293b;border-radius:12px;
+    padding:12px 14px;font-size:13px;line-height:1.6;backdrop-filter:blur(6px)}
+  #info{left:12px;top:12px;max-width:min(330px,calc(100vw - 24px))}
+  #info h1{margin:0 0 4px;font-size:15px;color:#7dd3fc;font-weight:600}
+  #status{color:#94a3b8}
+  #status.bad{color:#fca5a5;white-space:pre-wrap}
+  #ctl{right:12px;top:12px;text-align:right}
+  button{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:8px;
+    padding:6px 11px;font-size:12px;cursor:pointer;margin:2px}
+  button:hover{background:#334155} button.on{background:#0369a1;border-color:#0ea5e9}
+  .dim{color:#64748b;font-size:12px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel" id="info">
+  <h1>은색 거울 조각상 3D</h1>
+  <div id="status">불러오는 중…</div>
+  <div class="dim">드래그: 회전 · 휠/핀치: 확대 · 우클릭 드래그: 이동</div>
+</div>
+<div class="panel" id="ctl">
+  <button id="fit">화면에 맞추기</button><button id="flip">위아래 뒤집기</button><button id="spin">자동 회전</button>
+</div>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/",
+  "@sparkjsdev/spark":"https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js"
+}}
+</script>
+<script type="module">
+const SPLAT_FILE = new URLSearchParams(location.search).get("f") || "scene.sog";
+const FLIP_YZ = false;   // 변환 단계(make_ply.py)에서 y,z 부호를 이미 뒤집음
+const $ = id => document.getElementById(id);
+const status = (t, bad) => { $("status").textContent = t; $("status").className = bad ? "bad" : ""; };
+addEventListener("unhandledrejection", e => status("오류: " + (e.reason?.message || e.reason), true));
+
+try {
+  const THREE = await import("three");
+  const { OrbitControls } = await import("three/addons/controls/OrbitControls.js");
+  const SPARK = await import("@sparkjsdev/spark");
+
+  const renderer = new THREE.WebGLRenderer({ canvas: $("c"), antialias: false });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b0f14);
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 1000);
+  const controls = new OrbitControls(camera, $("c")); controls.enableDamping = true;
+  scene.add(new SPARK.SparkRenderer({ renderer }));      // 이것이 없으면 화면이 까맣게 나온다
+  const resize = () => { renderer.setSize(innerWidth, innerHeight, false);
+    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); };
+  addEventListener("resize", resize); resize();
+
+  const t0 = performance.now();
+  const r = await fetch(SPLAT_FILE);
+  if (!r.ok) throw new Error(`"${SPLAT_FILE}" 를 못 받았습니다 (${r.status})`);
+  const buf = await r.arrayBuffer();
+  const TYPE_OF = { ply: "ply", spz: "spz", splat: "splat", ksplat: "ksplat", sog: "pcsogszip" };
+  const fileType = TYPE_OF[SPLAT_FILE.split(".").pop().toLowerCase()];
+  if (!fileType) throw new Error("모르는 파일 형식입니다");
+  const mesh = new SPARK.SplatMesh({ fileBytes: new Uint8Array(buf), fileType });
+  scene.add(mesh); await mesh.initialized;
+  const n = mesh.packedSplats?.numSplats ?? 0;
+  if (!n) throw new Error("알갱이가 0개입니다");
+  status(`${SPLAT_FILE} · ${(buf.byteLength / 1048576).toFixed(1)} MiB · 알갱이 ${n.toLocaleString("ko-KR")}개 · ${((performance.now()-t0)/1000).toFixed(1)}초`);
+
+  function fit() {          // Box3.setFromObject 는 SplatMesh 에 빈 상자를 주므로 Spark 의 자를 쓴다
+    const box = mesh.getBoundingBox(true);
+    const c = box.getCenter(new THREE.Vector3());
+    const rad = box.getSize(new THREE.Vector3()).length() * 0.5;
+    controls.target.copy(c);
+    camera.position.copy(c).add(new THREE.Vector3(rad * .9, rad * .35, rad * 1.1));
+    camera.near = Math.max(rad / 1000, 0.001); camera.far = rad * 60; camera.updateProjectionMatrix();
+  }
+  if (FLIP_YZ) { mesh.scale.y *= -1; mesh.scale.z *= -1; }
+  fit();
+  $("fit").onclick = fit;
+  $("flip").onclick = () => { mesh.scale.y *= -1; mesh.scale.z *= -1; mesh.updateMatrixWorld(true); fit(); };
+  $("spin").onclick = e => { controls.autoRotate = !controls.autoRotate; controls.autoRotateSpeed = 0.8;
+    e.target.classList.toggle("on", controls.autoRotate); };
+  window.viewer = { scene, camera, controls, mesh, fit };
+  (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+} catch (e) { status("막혔습니다: " + (e?.message ?? e), true); }
+</script>
+</body>
+</html>
